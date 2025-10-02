@@ -72,47 +72,67 @@ async def main():
     for _, row in df_reg.iterrows():
         slug = str(row.get("slug","")).strip()
         wa_id = str(row.get("wa_id","")).strip()
-        doc_id = str(row.get("doc_id","")).strip()
-        faqs_name = (str(row.get("faqs_sheet_name","faqs")).strip() or "faqs")
-        promos_name = (str(row.get("promos_sheet_name","promos")).strip() or "promos")
-        locales_name = str(row.get("locales_sheet_name","")).strip()  # opcional
-
-        if not slug or not wa_id or not doc_id:
+        if not slug or not wa_id:
             continue
-
         routing[wa_id] = slug
 
-        # Construir URLs CSV por nombre de hoja
-        faqs_csv   = sheet_csv_url(doc_id, faqs_name)
-        promos_csv = sheet_csv_url(doc_id, promos_name)
+        # --- Detecta modo CSV directo o modo Sheets ---
+        faqs_csv_url   = str(row.get("faqs_csv_url","")).strip()
+        promos_csv_url = str(row.get("promos_csv_url","")).strip()
+        locales_csv_url= str(row.get("locales_csv_url","")).strip()
 
-        # Descargar
-        df_faqs   = await fetch_csv_as_df(faqs_csv)
-        df_promos = await fetch_csv_as_df(promos_csv)
+        if faqs_csv_url and promos_csv_url:
+            # MODO CSV DIRECTO (tus Drive links)
+            df_faqs   = await fetch_csv_as_df(faqs_csv_url)
+            df_promos = await fetch_csv_as_df(promos_csv_url)
+            # locales opcional
+            df_loc = None
+            if locales_csv_url:
+                try:
+                    df_loc = await fetch_csv_as_df(locales_csv_url)
+                except Exception as e:
+                    print(f"[WARN] locales_csv_url no accesible para slug={slug}: {e}", file=sys.stderr)
+        else:
+            # MODO SHEETS (doc_id + sheet=)
+            doc_id = str(row.get("doc_id","")).strip()
+            faqs_name = (str(row.get("faqs_sheet_name","faqs")).strip() or "faqs")
+            promos_name = (str(row.get("promos_sheet_name","promos")).strip() or "promos")
+            if not doc_id:
+                print(f"[WARN] fila sin URLs ni doc_id; slug={slug} omitido", file=sys.stderr)
+                continue
+            faqs_csv   = sheet_csv_url(doc_id, faqs_name)
+            promos_csv = sheet_csv_url(doc_id, promos_name)
+            df_faqs   = await fetch_csv_as_df(faqs_csv)
+            df_promos = await fetch_csv_as_df(promos_csv)
+            # locales opcional
+            df_loc = None
+            locales_name = str(row.get("locales_sheet_name","")).strip()
+            if locales_name:
+                try:
+                    locales_csv = sheet_csv_url(doc_id, locales_name)
+                    df_loc = await fetch_csv_as_df(locales_csv)
+                except Exception as e:
+                    print(f"[WARN] locales no aplicadas para slug={slug}: {e}", file=sys.stderr)
 
-        # Normalizar
+        # --- Normalización de FAQs / Promos ---
         faqs_json   = normalize_faqs(df_faqs)
         promos_json = normalize_promos(df_promos)
 
-        # locales (opcional): agrega promos por sede o cadena
-        if locales_name:
-            try:
-                locales_csv = sheet_csv_url(doc_id, locales_name)
-                df_loc = await fetch_csv_as_df(locales_csv)
-                # columnas esperadas: target_slug,name,trigger_keywords,message,start_date,end_date
-                if all(col in df_loc.columns for col in
-                       ["target_slug","name","trigger_keywords","message","start_date","end_date"]):
-                    # filtrar por target_slug == slug o '*'
-                    df_extra = df_loc[(df_loc["target_slug"]==slug) | (df_loc["target_slug"]=="*")].copy()
-                    if not df_extra.empty:
-                        df_extra = df_extra[["name","trigger_keywords","message","start_date","end_date"]]
-                        # concatenar
-                        df_concat = pd.concat([pd.DataFrame(promos_json["rows"]), df_extra], ignore_index=True)
-                        promos_json = normalize_promos(df_concat)  # re-normaliza
-            except Exception as e:
-                print(f"[WARN] locales no aplicadas para slug={slug}: {e}", file=sys.stderr)
+        # --- Merge de 'locales' si existe ---
+        if df_loc is not None:
+            # columnas esperadas: target_slug,name,trigger_keywords,message,start_date,end_date
+            if all(col in df_loc.columns for col in
+                   ["target_slug","name","trigger_keywords","message","start_date","end_date"]):
+                df_extra = df_loc[(df_loc["target_slug"]==slug) | (df_loc["target_slug"]=="*")].copy()
+                if not df_extra.empty:
+                    # Asegura mismas columnas que 'promos'
+                    df_extra = df_extra[["name","trigger_keywords","message","start_date","end_date"]]
+                    df_concat = pd.concat([pd.DataFrame(promos_json["rows"]), df_extra], ignore_index=True)
+                    promos_json = normalize_promos(df_concat)
+            else:
+                print(f"[WARN] hoja/CSV 'locales' sin columnas esperadas para slug={slug}", file=sys.stderr)
 
-        # 3) Escribir JSON por slug
+        # --- Escribe JSON por slug ---
         slug_dir = os.path.join(PAGES_DIR, "slugs", slug)
         os.makedirs(slug_dir, exist_ok=True)
         with open(os.path.join(slug_dir, "faqs.json"), "w", encoding="utf-8") as f:
@@ -120,7 +140,7 @@ async def main():
         with open(os.path.join(slug_dir, "promos.json"), "w", encoding="utf-8") as f:
             json.dump(promos_json, f, ensure_ascii=False)
 
-        # URLs relativas (GitHub Pages)
+        # URLs relativas en index.json
         slugs_meta[slug] = {
             "faqs_url": f"./slugs/{slug}/faqs.json",
             "promos_url": f"./slugs/{slug}/promos.json"
