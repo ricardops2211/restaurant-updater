@@ -1,8 +1,6 @@
 name: Build & Publish Data (GitHub Pages) + Refresh Bot
 
-on:
-  schedule:
-    - cron: "*/10 * * * *"   # cada 10 minutos
+
   workflow_dispatch:
 
 permissions:
